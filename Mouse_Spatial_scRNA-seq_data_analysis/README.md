@@ -1,0 +1,1 @@
+This project aims to explore the clusters in Xenium spatial data of the mouse spinal cord and integrate it with available mouse scRNA-seq data. The objective is to identify marker genes for motor neurons and validate this information spatially.
