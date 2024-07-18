@@ -1,0 +1,1 @@
+This project aims to explore scATAC-seq data from the ventral horn region of the mouse spinal cord. The primary goal is to determine if motor neurons can be distinctly separated from other cell types using putative marker genes.
