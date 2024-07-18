@@ -1,1 +1,4 @@
 This project aims to explore the clusters in Xenium spatial data of the mouse spinal cord and integrate it with available mouse scRNA-seq data. The objective is to identify marker genes for motor neurons and validate this information spatially.
+The `explore_xenium_obj_final.ipynb` notebook aims to identify Xenium clusters with high expression of known or potential motor neuron marker genes. 
+The `explore_russ_data_final.ipynb` notebook focuses on identifying cell types in the scRNA-seq data that exhibit high expression of known or potential motor neuron marker genes. 
+The `data_integration_russ_xen_final.ipynb` notebook integrates the spatial data with scRNA-seq data to find the Xenium clusters corresponding to motor neurons in mice, using the results obtained from the first two notebooks.
