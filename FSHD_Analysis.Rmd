@@ -1,0 +1,713 @@
+---
+title: "FSHD Analysis"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+
+```{r}
+#Load the required packages
+
+library(here)
+library(Seurat)
+library(scCustomize)
+library(dplyr)
+library(biomaRt)
+library(ggplot2)
+library(escape)
+```
+
+
+
+```{r}
+#Use BioMart to create gene map dataframe for converting ensembl id to gene symbol
+
+ensembl.con <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+```
+
+
+
+```{r}
+#read the txt count matrices and create a list of seurat objects
+
+data_files <- list.files(here("Data"), full.names = TRUE)
+
+seurat_list <- lapply(data_files, function(file_name) {
+
+  dataframe <- read.delim(file_name)
+  genes <- dataframe[["X"]]
+  rownames(dataframe) <- genes
+  dataframe[["X"]] <- NULL
+  dataframe <- as.matrix(dataframe)
+  seurat_obj <- CreateSeuratObject(counts = dataframe)
+  
+  seurat_obj$sample <- gsub("^.*_(.*?)\\.txt$", "\\1", basename(file_name))
+  
+  return(seurat_obj)
+})
+
+names(seurat_list) <- c("FSHD1.1", "FSHD1.2", "FSHD2.1", "FSHD2.2", "CTRL.1", "CTRL.2")
+```
+
+
+
+```{r}
+#merge the seurat objects
+
+merged_seurat <- merge(x = seurat_list[[1]], y = seurat_list[2:length(seurat_list)], add.cell.ids = names(seurat_list))
+```
+
+
+
+```{r}
+#number of cells in seurat object
+print(length(colnames(merged_seurat)))
+
+#number of genes in seurat object
+print(length(rownames(merged_seurat)))
+```
+
+
+
+```{r}
+#QC and filtering
+#low quality cells will have low number of genes or low number of molecules detected. Even cells have too many number of genes or molecules could be low quality as it may be a sign of a doublet or multiple cells labeled as single cell. also, we see a high contamination of mitochondrial genes in low quality cells so it is important to check that as well.
+```
+
+
+
+```{r}
+#from sccustomize package get a list of mitochondrial genes in ensembl id form
+
+mito_genes <- ensembl_mito_id$Homo_sapiens_mito_ensembl
+mito_genes[mito_genes %in% rownames(merged_seurat)]
+```
+
+
+
+```{r}
+#calculate the mitochondrial gene percentage in each cell
+
+mito_genes_filtered <- mito_genes[mito_genes %in% rownames(merged_seurat)]
+merged_seurat[["percent.mt"]] <- PercentageFeatureSet(merged_seurat, features = mito_genes_filtered)
+```
+
+
+
+```{r}
+#create violin plots and scatter plots to check the quality of cells
+
+p1 <- VlnPlot(merged_seurat, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+p1
+```
+
+
+
+```{r}
+ggsave(here("plots", "violin_plots_for_QC.pdf"), plot = p1, width = 14, height = 10, units = "in")
+```
+
+
+
+```{r}
+p2 <- FeatureScatter(merged_seurat, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+p3 <- FeatureScatter(merged_seurat, feature1 = "nCount_RNA", feature2 = "percent.mt")
+p2 + p3
+```
+
+
+
+```{r}
+ggsave(here("plots", "scatter_plot_nfeature_vs_ncount.pdf"), plot = p2, width = 14, height = 10, units = "in")
+ggsave(here("plots", "scatter_plot_percent_mt_vs_ncount.pdf"), plot = p3, width = 14, height = 10, units = "in")
+```
+
+
+
+```{r}
+#filtering of low quality cells
+
+merged_seurat <- subset(merged_seurat, subset = nFeature_RNA > 500 & nFeature_RNA < 4000 & percent.mt < 10)
+```
+
+
+
+```{r}
+#number of cells in filtered seurat object
+print(length(colnames(merged_seurat)))
+
+#number of genes in filteres seurat object
+print(length(rownames(merged_seurat)))
+```
+
+
+
+```{r}
+#check batch effects, run standard workflow 
+
+merged_seurat <- SCTransform(merged_seurat)
+merged_seurat <- RunPCA(merged_seurat)
+```
+
+
+
+```{r}
+#check the number of pca dimensions sufficient to explain maximum variance in data
+
+p4 <- ElbowPlot(merged_seurat)
+p4
+```
+
+
+
+```{r}
+ggsave(here("plots", "elbow_plot_original_seurat.pdf"), plot = p4, width = 14, height = 10, units = "in")
+```
+
+
+
+```{r}
+merged_seurat <- FindNeighbors(merged_seurat, dims = 1:15)
+merged_seurat <- FindClusters(merged_seurat, resolution = 0.3)
+merged_seurat <- RunUMAP(merged_seurat, dims = 1:15)
+```
+
+
+
+```{r}
+#visualizing batch effects
+
+p5 <- DimPlot(merged_seurat, group.by = "sample")
+p5
+```
+
+
+
+```{r}
+ggsave(here("plots", "dimplot_with_batch_effects.pdf"), plot = p5, width = 14, height = 10, units = "in")
+```
+
+
+
+```{r}
+#since batch effects were observed, perform integration
+
+obj.list <- SplitObject(merged_seurat, split.by = "sample")
+```
+
+
+
+```{r}
+for (i in 1:length(obj.list)){
+  obj.list[[i]] <- NormalizeData(object = obj.list[[i]])
+  obj.list[[i]] <- FindVariableFeatures(object = obj.list[[i]])
+}
+```
+
+
+
+```{r}
+#select integration features
+
+features <- SelectIntegrationFeatures(object.list = obj.list)
+```
+
+
+
+```{r}
+#find integration anchors using canonical correlation analysis (CCA)
+
+anchors <- FindIntegrationAnchors(object.list = obj.list, anchor.features = features)
+```
+
+
+
+```{r}
+#integrate data
+
+seurat.integrated <- IntegrateData(anchorset = anchors)
+```
+
+
+
+```{r}
+#scale data, run pca and umap on integrated object
+
+seurat.integrated <- ScaleData(object = seurat.integrated)
+```
+
+
+
+```{r}
+seurat.integrated <- RunPCA(object = seurat.integrated)
+ElbowPlot(seurat.integrated)
+
+```
+
+
+
+```{r}
+seurat.integrated <- RunUMAP(object = seurat.integrated, dims=1:15)
+```
+
+
+
+```{r}
+#visualize batch corrected seurat object
+
+p6 <- DimPlot(seurat.integrated, group.by = "sample")
+p6
+```
+
+
+
+```{r}
+ggsave(here("plots", "dimplot_batch_effects_corrected.pdf"), plot = p6, width = 14, height = 10, units = "in")
+```
+
+
+
+```{r}
+#add some extra metadata columns to easily retrieve disease and control sample for further downstream analysis
+
+seurat.integrated$subtype <- case_when(
+  grepl("^FSHD1", seurat.integrated$sample, ignore.case = TRUE) ~ "FSHD1",
+  grepl("^FSHD2", seurat.integrated$sample, ignore.case = TRUE) ~ "FSHD2",
+  TRUE ~ "Control"
+)
+```
+
+
+
+```{r}
+table(seurat.integrated$sample)
+```
+
+
+
+```{r}
+table(seurat.integrated$subtype)
+```
+
+
+
+```{r}
+seurat.integrated$type <- case_when(
+  grepl("^FSHD", seurat.integrated$sample, ignore.case = TRUE) ~ "Disease",
+  TRUE ~ "Control"
+)
+```
+
+
+
+```{r}
+table(seurat.integrated$type)
+```
+
+
+
+```{r}
+#annotate cell types using differential expression
+#check number of seurat clusters detected
+
+length(unique(seurat.integrated$seurat_clusters))
+```
+
+
+
+```{r}
+#reduce number of clusters
+seurat.integrated <- FindNeighbors(seurat.integrated, dims = 1:15)
+seurat.integrated <- FindClusters(seurat.integrated, resolution = 0.2)
+```
+
+
+
+```{r}
+#check number of seurat clusters
+length(unique(seurat.integrated$seurat_clusters))
+```
+
+
+
+```{r}
+DimPlot(seurat.integrated)
+```
+
+
+
+```{r}
+#perform differential expression analysis between clusters to find marker genes
+seurat.integrated.markers <- FindAllMarkers(seurat.integrated, only.pos = TRUE)
+seurat.integrated.markers %>%
+    group_by(cluster) %>%
+    filter(p_val_adj < 0.05 & abs(avg_log2FC) > 1) %>%
+    arrange(desc(avg_log2FC)) %>%
+    slice_head(n = 10) %>%
+    ungroup() -> top10
+p7 <- DoHeatmap(seurat.integrated, features = top10$gene)
+p7
+```
+
+
+
+```{r}
+#convert the ensembl ids to gene symbols in the heatmap plot
+
+gene_map <- getBM(
+    attributes = c("ensembl_gene_id", "external_gene_name"),
+    filters = "ensembl_gene_id",
+    values = top10$gene,
+    mart = ensembl.con)
+```
+
+
+
+```{r}
+length(gene_map$ensembl_gene_id)
+```
+
+
+
+```{r}
+gene_map_cleaned <- gene_map[!apply(gene_map, 1, function(row) any(is.na(row) | row == "")), ]
+```
+
+
+
+```{r}
+length(gene_map_cleaned$ensembl_gene_id)
+```
+
+
+
+```{r}
+#add the gene symbol column to top10 dataframe
+top10 <- top10 %>%
+  left_join(gene_map_cleaned, by = c("gene" = "ensembl_gene_id"))
+```
+
+
+
+```{r}
+top10 <- top10 %>%
+  mutate(external_gene_name = if_else(is.na(external_gene_name), gene, external_gene_name))
+```
+
+
+
+```{r}
+#heatmap with gene symbols
+
+gene_labels <- setNames(top10$external_gene_name, top10$gene)
+p8 <- DoHeatmap(seurat.integrated, features = top10$gene)
+p13 <- p8 + scale_y_discrete(labels = gene_labels)
+p13
+```
+
+
+
+```{r}
+ggsave(here("plots", "differential_expression_heatmap_between_seurat_clusters.pdf"), plot = p13, width = 14, height = 10, units = "in")
+```
+
+
+
+```{r}
+table(seurat.integrated$seurat_clusters)
+```
+
+
+
+```{r}
+Idents(seurat.integrated) <- seurat.integrated$seurat_clusters
+```
+
+
+
+```{r}
+#annotate
+new.cluster.ids <- c("Other","Myocytes", "Other", "Other", "Other", "Other", "DUX4_affected")
+names(new.cluster.ids) <- levels(seurat.integrated)
+seurat.integrated <- RenameIdents(seurat.integrated, new.cluster.ids)
+```
+
+
+
+```{r}
+levels(seurat.integrated)
+```
+
+
+
+```{r}
+#plot of annotated cells
+
+p9 <- DimPlot(seurat.integrated)
+p9
+```
+
+
+
+```{r}
+ggsave(here("plots", "dimplot_annotated.pdf"), plot = p9, width = 14, height = 10, units = "in")
+```
+
+
+
+```{r}
+#create a new column in metadata containing the annotations
+seurat.integrated$cell_type <- Idents(seurat.integrated)
+```
+
+
+
+```{r}
+table(seurat.integrated$cell_type)
+```
+
+
+
+```{r}
+#We see that DUX4-affected cells are only present in disease samples
+
+p10 <- DimPlot(seurat.integrated, group.by = "cell_type", split.by = "type", ncol = 2)
+p10
+```
+
+
+
+```{r}
+ggsave(here("plots", "Dimplot_control_vs_disease_sample.pdf"), plot = p10, width = 14, height = 10, units = "in")
+```
+
+
+
+```{r}
+#current Idents is cell_type column in metadata
+#changing it to type column for differential expression analysis
+
+Idents(seurat.integrated) <- seurat.integrated$type
+```
+
+
+
+```{r}
+#differential expression analysis between control and disease samples
+
+seurat.integrated.markers2 <- FindAllMarkers(seurat.integrated, only.pos = TRUE)
+seurat.integrated.markers2 %>%
+    group_by(cluster) %>%
+    filter(p_val_adj < 0.05 & abs(avg_log2FC) > 1) %>%
+    arrange(desc(avg_log2FC)) %>%
+    slice_head(n = 10) %>%
+    ungroup() -> top10_2
+p11 <- DoHeatmap(seurat.integrated, features = top10_2$gene)
+p11
+```
+
+
+
+```{r}
+#convert the ensembl ids to gene symbols in the heatmap plot
+
+gene_map <- getBM(
+    attributes = c("ensembl_gene_id", "external_gene_name"),
+    filters = "ensembl_gene_id",
+    values = top10_2$gene,
+    mart = ensembl.con)
+```
+
+
+
+```{r}
+length(gene_map$ensembl_gene_id)
+```
+
+
+
+```{r}
+gene_map_cleaned <- gene_map[!apply(gene_map, 1, function(row) any(is.na(row) | row == "")), ]
+```
+
+
+
+```{r}
+length(gene_map_cleaned$ensembl_gene_id)
+```
+
+
+
+```{r}
+#add the gene symbol column to top10 dataframe
+top10_2 <- top10_2 %>%
+  left_join(gene_map_cleaned, by = c("gene" = "ensembl_gene_id"))
+```
+
+
+
+```{r}
+top10_2 <- top10_2 %>%
+  mutate(external_gene_name = if_else(is.na(external_gene_name), gene, external_gene_name))
+```
+
+
+
+```{r}
+#heatmap with gene symbols
+
+gene_labels <- setNames(top10_2$external_gene_name, top10_2$gene)
+p12 <- DoHeatmap(seurat.integrated, features = top10_2$gene)
+p14 <- p12 + scale_y_discrete(labels = gene_labels)
+p14
+```
+
+
+
+```{r}
+ggsave(here("plots", "differential_expression_heatmap_control_vs_disease.pdf"), plot = p14, width = 14, height = 10, units = "in")
+```
+
+
+
+```{r}
+#pathway enrichment analysis between diseased and control samples
+
+GS.hallmark <- getGeneSets(species = "Homo sapiens", library = "H")
+```
+
+
+
+```{r}
+#create a new count matrix with ensembl ids replaced with gene symbol
+escape_input <- seurat.integrated[["SCT"]]$counts
+```
+
+
+
+```{r}
+gene_map <- getBM(
+    attributes = c("ensembl_gene_id", "hgnc_symbol"),
+    filters = "ensembl_gene_id",
+    values = rownames(escape_input),
+    mart = ensembl.con)
+```
+
+
+
+```{r}
+length(gene_map$ensembl_gene_id)
+```
+
+
+
+```{r}
+gene_map_cleaned <- gene_map[!apply(gene_map, 1, function(row) any(is.na(row) | row == "")), ]
+```
+
+
+
+```{r}
+length(gene_map_cleaned$ensembl_gene_id)
+```
+
+
+
+```{r}
+# Rename columns for clarity (if not already named)
+colnames(gene_map_cleaned) <- c("ensembl_id", "gene_symbol")
+
+# Filter to keep only non-empty gene symbols
+gene_map_cleaned <- gene_map_cleaned[gene_map_cleaned$gene_symbol != "", ]
+
+# Remove duplicated Ensembl IDs to ensure 1-to-1 mapping
+gene_map_cleaned <- gene_map_cleaned[!duplicated(gene_map_cleaned$ensembl_id), ]
+```
+
+
+
+```{r}
+length(gene_map_cleaned$ensembl_id)
+```
+
+
+
+```{r}
+# Subset matrix to only include rows (genes) that are in the mapping
+common_ids <- intersect(rownames(escape_input), gene_map_cleaned$ensembl_id)
+counts_matrix_filtered <- escape_input[common_ids, ]
+
+# Match Ensembl IDs to gene symbols
+matched_symbols <- gene_map_cleaned$gene_symbol[match(rownames(counts_matrix_filtered), gene_map_cleaned$ensembl_id)]
+
+# Assign gene symbols as rownames
+rownames(counts_matrix_filtered) <- matched_symbols
+
+```
+
+
+
+```{r}
+#using the counts matrix from SCT assay, the gene names have been converted from ensembl id to gene symbols
+
+enrichment.scores <- escape.matrix(counts_matrix_filtered, 
+                                   gene.sets = GS.hallmark,
+                                   groups = 1000, 
+                                   normalize=TRUE,
+                                   min.size = 5)
+```
+
+
+
+```{r}
+new.assay <- CreateAssayObject(data = as.matrix(t(enrichment.scores)))
+
+seurat.integrated[["escape"]] <- new.assay
+```
+
+
+
+```{r}
+#plotting the enrichment analysis of disease vs control for each cell type
+
+heatmap_plot <- heatmapEnrichment(seurat.integrated, gene.set.use = "all", group.by = "type",
+                  assay = "escape", scale = TRUE, palette = "Purple-Green", facet.by = "cell_type") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+
+```{r}
+heatmap_plot
+```
+
+
+
+```{r}
+ggsave(here("plots", "heatmap_enrichment_analysis.pdf"), plot = heatmap_plot, width = 14, height = 10, units = "in")
+```
+
+
+
+```{r}
+#save seurat object
+seurat_file <- here("Data", "seurat_integrated.qs")
+qs::qsave(seurat.integrated, seurat_file)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
